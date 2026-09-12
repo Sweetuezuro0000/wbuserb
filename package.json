@@ -1,7 +1,6 @@
 {
   "name": "whatsapp-userbot",
   "version": "1.0.0",
-  "description": "WhatsApp Multi-Feature Userbot with Forwarder",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
@@ -12,6 +11,7 @@
     "fluent-ffmpeg": "^2.1.2",
     "google-tts-api": "^2.0.2",
     "pino": "^8.19.0",
+    "qrcode": "^1.5.3",
     "qrcode-terminal": "^0.12.0",
     "wa-sticker-formatter": "^4.4.4"
   },
