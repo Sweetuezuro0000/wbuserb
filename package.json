@@ -1,0 +1,21 @@
+{
+  "name": "whatsapp-userbot",
+  "version": "1.0.0",
+  "description": "WhatsApp Multi-Feature Userbot with Forwarder",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.6.0",
+    "axios": "^1.6.8",
+    "fluent-ffmpeg": "^2.1.2",
+    "google-tts-api": "^2.0.2",
+    "pino": "^8.19.0",
+    "qrcode-terminal": "^0.12.0",
+    "wa-sticker-formatter": "^4.4.4"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
