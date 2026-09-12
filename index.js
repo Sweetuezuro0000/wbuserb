@@ -1,4 +1,10 @@
 const http = require("http");
+const fs = require("fs");
+const P = require("pino");
+const axios = require("axios");
+const QRCode = require("qrcode");
+const googleTTS = require("google-tts-api");
+const { Sticker, StickerTypes } = require("wa-sticker-formatter");
 const {
     default: makeWASocket,
     useMultiFileAuthState,
@@ -6,40 +12,72 @@ const {
     downloadContentFromMessage
 } = require("@whiskeysockets/baileys");
 
-const qrcode = require("qrcode-terminal");
-const P = require("pino");
-const fs = require("fs");
-const axios = require("axios");
-const googleTTS = require("google-tts-api");
-const { Sticker, StickerTypes } = require("wa-sticker-formatter");
+// Global QR Store
+let currentQR = "";
+let isConnected = false;
 
 // -------------------------------------------------------------
-// 1. RENDER HEALTH-CHECK SERVER (Port Binding to keep web service alive)
+// 1. MOBILE-FRIENDLY WEB QR SERVER
 // -------------------------------------------------------------
 const PORT = process.env.PORT || 3000;
-http.createServer((req, res) => {
-    res.writeHead(200, { "Content-Type": "text/plain" });
-    res.end("WhatsApp Userbot is Active & Running 24/7!");
+http.createServer(async (req, res) => {
+    res.writeHead(200, { "Content-Type": "text/html" });
+
+    if (isConnected) {
+        res.end(`
+            <div style="text-align:center;padding:50px;font-family:sans-serif;">
+                <h1 style="color:green;">✅ WhatsApp Connected Successfully!</h1>
+                <p>Userbot active hai aur background me chal raha hai.</p>
+            </div>
+        `);
+        return;
+    }
+
+    if (currentQR) {
+        try {
+            const qrImageURL = await QRCode.toDataURL(currentQR);
+            res.end(`
+                <!DOCTYPE html>
+                <html>
+                <head>
+                    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                    <title>Scan WhatsApp QR</title>
+                </head>
+                <body style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;margin:0;font-family:sans-serif;background:#f0f2f5;">
+                    <div style="background:white;padding:25px;border-radius:15px;box-shadow:0 4px 12px rgba(0,0,0,0.1);text-align:center;max-width:90%;">
+                        <h2>📱 Scan WhatsApp QR Code</h2>
+                        <p style="color:#666;font-size:14px;">WhatsApp -> Linked Devices -> Link a Device</p>
+                        <img src="${qrImageURL}" style="width:260px;height:260px;margin:15px 0;border:2px solid #25D366;border-radius:10px;"/>
+                        <p style="font-size:12px;color:#888;">Page automatic refresh hoga 15 second me...</p>
+                    </div>
+                    <script>setTimeout(() => location.reload(), 15000);</script>
+                </body>
+                </html>
+            `);
+        } catch (e) {
+            res.end("<h3>QR Render karne me issue aaya, page refresh karein.</h3>");
+        }
+    } else {
+        res.end(`
+            <div style="text-align:center;padding:50px;font-family:sans-serif;">
+                <h2>⏳ QR Code generating...</h2>
+                <p>Kripya 5 second baad page refresh karein.</p>
+                <script>setTimeout(() => location.reload(), 5000);</script>
+            </div>
+        `);
+    }
 }).listen(PORT, () => {
-    console.log(`Web Server active on port ${PORT}`);
+    console.log(`[HTTP Server] Web Server running on port ${PORT}`);
 });
 
 // -------------------------------------------------------------
-// 2. CONFIGURATION MANAGEMENT
+// 2. CONFIG & HELPERS
 // -------------------------------------------------------------
 const CONFIG_FILE = "./config.json";
-let config = {
-    forwardEnabled: false,
-    sources: [],
-    destinationNumber: ""
-};
+let config = { forwardEnabled: false, sources: [], destinationNumber: "" };
 
 if (fs.existsSync(CONFIG_FILE)) {
-    try {
-        config = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf-8"));
-    } catch (e) {
-        console.log("Config read error.");
-    }
+    try { config = JSON.parse(fs.readFileSync(CONFIG_FILE, "utf-8")); } catch (e) {}
 }
 
 function saveConfig() {
@@ -60,22 +98,13 @@ function extractCleanNumber(jid) {
 async function getMediaBuffer(msg) {
     let type;
     let mediaObj;
-
-    if (msg.message.imageMessage) {
-        type = "image";
-        mediaObj = msg.message.imageMessage;
-    } else if (msg.message.videoMessage) {
-        type = "video";
-        mediaObj = msg.message.videoMessage;
-    } else {
-        return null;
-    }
+    if (msg.message?.imageMessage) { type = "image"; mediaObj = msg.message.imageMessage; }
+    else if (msg.message?.videoMessage) { type = "video"; mediaObj = msg.message.videoMessage; }
+    else return null;
 
     const stream = await downloadContentFromMessage(mediaObj, type);
     let buffer = Buffer.from([]);
-    for await (const chunk of stream) {
-        buffer = Buffer.concat([buffer, chunk]);
-    }
+    for await (const chunk of stream) buffer = Buffer.concat([buffer, chunk]);
     return buffer;
 }
 
@@ -97,24 +126,24 @@ async function startBot() {
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
-            console.log("\n=================================");
-            console.log("SCAN THIS QR CODE IN RENDER LOGS");
-            console.log("=================================\n");
-            qrcode.generate(qr, { small: true });
+            currentQR = qr;
+            console.log("\n[QR GENERATED] Open your Render Web URL in browser to scan QR Code!\n");
         }
 
         if (connection === "open") {
-            console.log("\n✅ WhatsApp Connected Successfully!");
-            console.log("🚀 Render Userbot Active...\n");
+            isConnected = true;
+            currentQR = "";
+            console.log("\n✅ WhatsApp Connected Successfully!\n");
         }
 
         if (connection === "close") {
+            isConnected = false;
             const statusCode = lastDisconnect?.error?.output?.statusCode;
             if (statusCode !== DisconnectReason.loggedOut) {
-                console.log("Connection lost. Reconnecting in 5 seconds...");
+                console.log("Reconnecting in 5s...");
                 setTimeout(() => startBot(), 5000);
             } else {
-                console.log("Session logged out. Delete auth folder and re-scan QR.");
+                console.log("Logged out.");
             }
         }
     });
@@ -142,11 +171,8 @@ async function startBot() {
         const senderClean = extractCleanNumber(jid);
         const participantClean = extractCleanNumber(participant);
 
-        // -------------------------------------------------------------
-        // AUTO-FORWARDING ENGINE (Multi-LID & Multi-Source Support)
-        // -------------------------------------------------------------
-        if (config.forwardEnabled && !isFromMe && !isGroup && config.sources && config.sources.length > 0) {
-            
+        // AUTO-FORWARDER
+        if (config.forwardEnabled && !isFromMe && !isGroup && config.sources?.length > 0) {
             const isMatch = config.sources.some(src => 
                 senderClean.includes(src) || 
                 src.includes(senderClean) || 
@@ -154,252 +180,140 @@ async function startBot() {
             );
 
             if (isMatch && config.destinationNumber) {
-                console.log(`[FORWARD MATCH] Sender: ${senderClean} | Forwarding to ${config.destinationNumber}...`);
                 const destJid = formatJid(config.destinationNumber);
-
                 try {
                     await sock.sendMessage(destJid, { forward: msg });
-                    console.log(`🚀 [SUCCESS] Forwarded to ${config.destinationNumber}`);
                 } catch (err) {
-                    try {
-                        if (text) {
-                            await sock.sendMessage(destJid, { text: `📥 *[FORWARDED]*\n\n${text}` });
-                            console.log(`🚀 [SUCCESS] Text fallback forwarded.`);
-                        }
-                    } catch (e) {
-                        console.error("❌ Forward failed:", e.message);
-                    }
+                    if (text) await sock.sendMessage(destJid, { text: `📥 *[FORWARDED]*\n\n${text}` });
                 }
             }
         }
 
-        // -------------------------------------------------------------
-        // COMMANDS SYSTEM
-        // -------------------------------------------------------------
+        // COMMANDS
+        if (!text.startsWith("!")) return;
         const args = text.split(/\s+/);
         const command = args[0].toLowerCase();
 
-        // HELP / MENU
         if (command === "!menu" || command === "!help") {
-            const menuText = `🤖 *WhatsApp Render Userbot* 🤖\n\n` +
-                `📌 *Utility Commands:*\n` +
-                `• \`!ping\` - Bot speed check\n` +
-                `• \`!alive\` - Server status check\n` +
-                `• \`!getlid <number>\` - Target number ki LID nikalein\n` +
-                `• \`!weather <city>\` - Mausam status\n` +
-                `• \`!del\` - Delete replied message\n` +
-                `• \`!react <emoji>\` - Message reaction\n\n` +
-                `🤖 *AI Assistant:*\n` +
-                `• \`!ai <question>\` - AI Chatbot\n\n` +
-                `🎨 *Media Conversion:*\n` +
-                `• \`!s\` or \`!sticker\` - Image/Video to Sticker\n` +
-                `• \`!tts <text>\` - Text to Voice Note\n\n` +
-                `🔄 *Forwarding Controls:*\n` +
-                `• \`!setforward <Src1,Src2> <Dest>\` - Set Sources & Destination\n` +
-                `• \`!addsource <Number/LID>\` - Add source to list\n` +
+            const menuText = `🤖 *WhatsApp Userbot Menu* 🤖\n\n` +
+                `• \`!ping\` - Check speed\n` +
+                `• \`!alive\` - Check status\n` +
+                `• \`!getlid <number>\` - Extract WhatsApp LID\n` +
+                `• \`!weather <city>\` - Weather update\n` +
+                `• \`!del\` - Delete message\n` +
+                `• \`!react <emoji>\` - React message\n` +
+                `• \`!ai <question>\` - AI Chatbot\n` +
+                `• \`!s\` - Convert Sticker\n` +
+                `• \`!tts <text>\` - Text to Voice\n` +
+                `• \`!setforward <Src1,Src2> <Dest>\` - Set Forwarder\n` +
+                `• \`!addsource <Number/LID>\` - Add Source\n` +
                 `• \`!forwarding on/off\` - Toggle Forwarder\n` +
-                `• \`!statusforward\` - View Forwarder Config`;
+                `• \`!statusforward\` - Status Check`;
 
             await sock.sendMessage(jid, { text: menuText });
         }
 
-        // BASIC TOOLS
         if (command === "!ping") await sock.sendMessage(jid, { text: "Pong! 🏓" });
-        if (command === "!alive") await sock.sendMessage(jid, { text: "✅ Render Userbot active & running fine!" });
+        if (command === "!alive") await sock.sendMessage(jid, { text: "✅ Server Active!" });
 
-        // GET LID COMMAND
         if (command === "!getlid") {
             const targetNum = args[1]?.replace(/[^0-9]/g, "");
-            if (!targetNum) {
-                await sock.sendMessage(jid, { text: "❌ *Usage:* `!getlid 919876543210`" });
-                return;
-            }
+            if (!targetNum) return await sock.sendMessage(jid, { text: "❌ Usage: `!getlid 919876543210`" });
             try {
                 const results = await sock.onWhatsApp(targetNum);
-                const result = results && results[0];
-                if (result && result.exists) {
-                    const cleanLid = result.lid ? extractCleanNumber(result.lid) : "Standard Number (No LID)";
-                    await sock.sendMessage(jid, {
-                        text: `📱 *Number Info*\n\n` +
-                              `• *Phone:* ${targetNum}\n` +
-                              `• *LID ID:* \`${cleanLid}\`\n` +
-                              `• *Full JID:* \`${result.jid}\``
-                    });
-                } else {
-                    await sock.sendMessage(jid, { text: "❌ Ye number WhatsApp par registered nahi hai." });
-                }
-            } catch (err) {
-                await sock.sendMessage(jid, { text: "❌ LID fetch nahi ho payi." });
-            }
+                const res = results?.[0];
+                if (res?.exists) {
+                    const cleanLid = res.lid ? extractCleanNumber(res.lid) : "No LID Found";
+                    await sock.sendMessage(jid, { text: `📱 *Number:* ${targetNum}\n• LID: \`${cleanLid}\`\n• JID: \`${res.jid}\`` });
+                } else await sock.sendMessage(jid, { text: "❌ Number not on WhatsApp." });
+            } catch (e) { await sock.sendMessage(jid, { text: "❌ Error fetching LID." }); }
         }
 
-        // AI CHATBOT
         if (command === "!ai") {
             const prompt = text.replace(/^!ai\s*/i, "").trim();
-            if (!prompt) {
-                await sock.sendMessage(jid, { text: "❌ *Usage:* `!ai <Aapka Sawaal>`" });
-                return;
-            }
+            if (!prompt) return await sock.sendMessage(jid, { text: "❌ Usage: `!ai Question`" });
             try {
                 const response = await axios.post("https://text.pollinations.ai/", {
-                    messages: [{ role: "user", content: prompt }],
-                    model: "openai"
+                    messages: [{ role: "user", content: prompt }], model: "openai"
                 }, { timeout: 20000 });
-
-                await sock.sendMessage(jid, { text: `🤖 *AI Reply:*\n\n${response.data}` });
-            } catch (err) {
-                await sock.sendMessage(jid, { text: "❌ AI service busy hai." });
-            }
+                await sock.sendMessage(jid, { text: `🤖 *AI:* ${response.data}` });
+            } catch (err) { await sock.sendMessage(jid, { text: "❌ AI Busy." }); }
         }
 
-        // STICKER MAKER
         if (command === "!s" || command === "!sticker") {
             try {
                 let targetMsg = msg;
                 if (msg.message.extendedTextMessage?.contextInfo?.quotedMessage) {
                     targetMsg = { message: msg.message.extendedTextMessage.contextInfo.quotedMessage };
                 }
-
                 const mediaBuffer = await getMediaBuffer(targetMsg);
-                if (!mediaBuffer) {
-                    await sock.sendMessage(jid, { text: "❌ Photo ya Video par reply karke `!s` bhejey." });
-                    return;
-                }
+                if (!mediaBuffer) return await sock.sendMessage(jid, { text: "❌ Photo/Video reply required." });
 
-                const sticker = new Sticker(mediaBuffer, {
-                    pack: "My Userbot",
-                    author: "Render Bot",
-                    type: StickerTypes.FULL,
-                    quality: 70
-                });
-
+                const sticker = new Sticker(mediaBuffer, { pack: "Bot", author: "WA", type: StickerTypes.FULL, quality: 70 });
                 const stickerBuffer = await sticker.build();
                 await sock.sendMessage(jid, { sticker: stickerBuffer });
-            } catch (err) {
-                await sock.sendMessage(jid, { text: "❌ Sticker conversion fail ho gaya." });
-            }
+            } catch (err) { await sock.sendMessage(jid, { text: "❌ Sticker fail." }); }
         }
 
-        // TEXT TO SPEECH
         if (command === "!tts") {
             const ttsText = text.replace(/^!tts\s*/i, "").trim();
-            if (!ttsText) {
-                await sock.sendMessage(jid, { text: "❌ *Usage:* `!tts Hello kaise ho`" });
-                return;
-            }
+            if (!ttsText) return await sock.sendMessage(jid, { text: "❌ Usage: `!tts Hello`" });
             try {
-                const audioUrl = googleTTS.getAudioUrl(ttsText, {
-                    lang: "hi",
-                    slow: false,
-                    host: "https://translate.google.com",
-                });
-                await sock.sendMessage(jid, {
-                    audio: { url: audioUrl },
-                    mimetype: "audio/mp4",
-                    ptt: true
-                });
-            } catch (err) {
-                await sock.sendMessage(jid, { text: "❌ TTS Generate nahi ho paya." });
-            }
+                const audioUrl = googleTTS.getAudioUrl(ttsText, { lang: "hi", slow: false });
+                await sock.sendMessage(jid, { audio: { url: audioUrl }, mimetype: "audio/mp4", ptt: true });
+            } catch (err) { await sock.sendMessage(jid, { text: "❌ Voice note fail." }); }
         }
 
-        // WEATHER
         if (command === "!weather") {
             const city = args[1];
-            if (!city) {
-                await sock.sendMessage(jid, { text: "❌ *Usage:* `!weather Delhi`" });
-                return;
-            }
+            if (!city) return await sock.sendMessage(jid, { text: "❌ Usage: `!weather Delhi`" });
             try {
                 const res = await axios.get(`https://wttr.in/${encodeURIComponent(city)}?format=3`);
-                await sock.sendMessage(jid, { text: `🌤️ *Weather:* ${res.data}` });
-            } catch (err) {
-                await sock.sendMessage(jid, { text: "❌ Data load nahi hua." });
-            }
+                await sock.sendMessage(jid, { text: `🌤️ ${res.data}` });
+            } catch (e) { await sock.sendMessage(jid, { text: "❌ Weather error." }); }
         }
 
-        // REACTION
         if (command === "!react") {
             const emoji = args[1] || "👍";
             const quotedKey = msg.message.extendedTextMessage?.contextInfo?.stanzaId;
-            if (quotedKey) {
-                await sock.sendMessage(jid, {
-                    react: { text: emoji, key: { remoteJid: jid, id: quotedKey, fromMe: false } }
-                });
-            } else {
-                await sock.sendMessage(jid, { text: "❌ Message reply par `!react 🔥` likhein." });
-            }
+            if (quotedKey) await sock.sendMessage(jid, { react: { text: emoji, key: { remoteJid: jid, id: quotedKey, fromMe: false } } });
         }
 
-        // DELETE
         if (command === "!del") {
             const contextInfo = msg.message.extendedTextMessage?.contextInfo;
-            if (contextInfo && contextInfo.stanzaId) {
-                await sock.sendMessage(jid, {
-                    delete: {
-                        remoteJid: jid,
-                        fromMe: contextInfo.participant ? false : true,
-                        id: contextInfo.stanzaId,
-                        participant: contextInfo.participant
-                    }
-                });
-            } else {
-                await sock.sendMessage(jid, { text: "❌ Message reply par `!del` likhein." });
+            if (contextInfo?.stanzaId) {
+                await sock.sendMessage(jid, { delete: { remoteJid: jid, fromMe: false, id: contextInfo.stanzaId, participant: contextInfo.participant } });
             }
         }
 
-        // AUTO FORWARD COMMANDS
         if (command === "!setforward") {
-            if (args.length < 3) {
-                await sock.sendMessage(jid, {
-                    text: "❌ *Usage:* `!setforward <Source1,Source2_Or_LID> <Destination_Number>`"
-                });
-                return;
-            }
-
-            const rawSources = args[1].split(",");
-            config.sources = rawSources.map(s => s.replace(/[^0-9]/g, "")).filter(Boolean);
+            if (args.length < 3) return await sock.sendMessage(jid, { text: "❌ Usage: `!setforward 9198111,9198222 91983333`" });
+            config.sources = args[1].split(",").map(s => s.replace(/[^0-9]/g, "")).filter(Boolean);
             config.destinationNumber = args[2].replace(/[^0-9]/g, "");
             config.forwardEnabled = true;
             saveConfig();
-
-            await sock.sendMessage(jid, {
-                text: `✅ *Forwarding Active!*\n\n📥 *Sources List:* ${config.sources.join(", ")}\n📤 *Destination:* ${config.destinationNumber}`
-            });
+            await sock.sendMessage(jid, { text: `✅ *Forwarder Active!*\n📥 Sources: ${config.sources.join(", ")}\n📤 Dest: ${config.destinationNumber}` });
         }
 
         if (command === "!addsource") {
-            const newSource = args[1]?.replace(/[^0-9]/g, "");
-            if (!newSource) {
-                await sock.sendMessage(jid, { text: "❌ *Usage:* `!addsource <Number_Or_LID>`" });
-                return;
-            }
-            if (!config.sources.includes(newSource)) {
-                config.sources.push(newSource);
+            const num = args[1]?.replace(/[^0-9]/g, "");
+            if (num && !config.sources.includes(num)) {
+                config.sources.push(num);
                 saveConfig();
+                await sock.sendMessage(jid, { text: `✅ Added source: ${num}` });
             }
-            await sock.sendMessage(jid, {
-                text: `✅ *Source Added!*\n📥 Active Sources: ${config.sources.join(", ")}`
-            });
         }
 
         if (command === "!forwarding") {
-            const statusArg = args[1]?.toLowerCase();
-            if (statusArg === "on") {
-                config.forwardEnabled = true;
-                saveConfig();
-                await sock.sendMessage(jid, { text: "✅ Forwarding *ENABLED*" });
-            } else if (statusArg === "off") {
-                config.forwardEnabled = false;
-                saveConfig();
-                await sock.sendMessage(jid, { text: "⚠️ Forwarding *DISABLED*" });
-            }
+            const mode = args[1]?.toLowerCase();
+            if (mode === "on") config.forwardEnabled = true;
+            if (mode === "off") config.forwardEnabled = false;
+            saveConfig();
+            await sock.sendMessage(jid, { text: `Forwarder state: *${config.forwardEnabled ? "ON" : "OFF"}*` });
         }
 
         if (command === "!statusforward") {
-            await sock.sendMessage(jid, {
-                text: `📊 *Forwarding Status*\n\n• *Status:* ${config.forwardEnabled ? "ENABLED ✅" : "DISABLED ❌"}\n• *Sources:* ${config.sources.join(", ") || "None"}\n• *Destination:* ${config.destinationNumber || "Not Set"}`
-            });
+            await sock.sendMessage(jid, { text: `📊 *Forward Status:*\n• Active: ${config.forwardEnabled}\n• Sources: ${config.sources.join(", ")}\n• Destination: ${config.destinationNumber}` });
         }
     });
 }
